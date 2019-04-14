@@ -7,6 +7,7 @@ const readLine = require('readline');
 const usb = require('usb');
 const sprintf = require('sprintf-js').sprintf;
 const vsprintf = require('sprintf-js').vsprintf;
+const uuidv1 = require('uuid/v1');
 
 const controlCharacters = {
 	SOH: 0x01,
@@ -207,15 +208,13 @@ function readFrame(value){
 
 module.exports = class MchPicUsbHidBootloader{
 	constructor(appFlashBaseAddress, appFlashEndAddress) {
-		this.writeApplicationPending = false;
-		this.writeApplicationCRCData = false;
-		this.writeApplicationCRCStatus;
-
+		this.pendingCommands = [];
     	this.appFlashBaseAddress = appFlashBaseAddress;
     	this.appFlashEndAddress = appFlashEndAddress;
-    	this.hexFile;
     	this.debug = false;
     	this.debugUsb = false;
+    	this.commandsTimeout = -1;
+    	this.commandsTimeoutInterval;
 	}
 
 	setDebug(option){
@@ -225,6 +224,10 @@ module.exports = class MchPicUsbHidBootloader{
 
 	setUsbDebug(option){
 		this.debugUsb = option;
+	}
+
+	setTimeout(timeout){
+		this.commandsTimeout = timeout;
 	}
 
 	log(trace){
@@ -259,6 +262,20 @@ module.exports = class MchPicUsbHidBootloader{
 		this.inEndPoint.on('end',function(){
 			this.log("Poll end");
 		}.bind(this));
+
+		var scope = this;
+		this.commandsTimeoutInterval = setInterval(function(){
+			var indexesToComplete = [];
+			for(var i = 0;i < scope.pendingCommands.length;i++){
+				if(scope.pendingCommands[i].timeout > 0){
+					if(((new Date()).getTime() - scope.pendingCommands[i].lastCheck) >= scope.pendingCommands[i].timeout){
+						scope.pendingCommands[i].callbackError("Command Timeout");
+						indexesToComplete.push(i);
+					}
+				}
+			}
+			for(var i = 0;i < indexesToComplete.length;i++) scope.pendingCommands.splice(indexesToComplete[i],1);
+		},100);
 	}
 
 	closeUsb(){
@@ -267,19 +284,43 @@ module.exports = class MchPicUsbHidBootloader{
 	        this.log("Error on interface release");
 	    }.bind(this));
 	    this.device.close();
+	    clearInterval(this.commandsTimeoutInterval);
 	}
 
-	sendCommand(data){
+	static get commands() {
+	    return commands;
+	}
+
+	sendCommand(data,timeout){
+		var scope = this;
 		var result = new Promise(function(resolve, reject) {
-			this.outEndPoint.transfer(sendFrame(data),function(err){
+			scope.outEndPoint.transfer(sendFrame(data),function(err){
 		        if(err){
 		        	reject("Command error " + err);
 		        }else{
-		        	resolve();
+		        	scope.pendingCommands.push({
+		        		command: data[0],
+		        		callback: resolve,
+		        		callbackError: reject,
+		        		timeout: timeout ? timeout : scope.commandsTimeout,
+		        		lastCheck: (new Date()).getTime()
+		        	});
 		        }
 			});
-		}.bind(this));
+		});
 		return result;
+	}
+
+	completePending(response){
+		var index = -1;
+		for(var i = this.pendingCommands.length-1;i >= 0;i--){
+			if(this.pendingCommands[i].command == response.command){
+				this.pendingCommands[i].callback(response);
+				index = i;
+				break;
+			}
+		}
+		if(index >= 0) this.pendingCommands.splice(index,1);
 	}
 
 	readCommand(data){
@@ -289,28 +330,24 @@ module.exports = class MchPicUsbHidBootloader{
 				switch(response.command){
 					case commands.VERSION:
 						this.log("Bootloader version - Major: " + response.majorVer + ", Minor: " + response.minorVer);
-						return response;
+						this.completePending(response);
 					break;
 					case commands.ERASE:
 						this.log("Bootloader erase command: " + response.command + ", success");
-						return response;
+						this.completePending(response);
 					break;
 					case commands.PROGRAM:
 						this.log("Bootloader program command: " + response.command + ", success");
-						return response;
+						this.completePending(response);
 					break;
 					case commands.READ:
-						if(this.writeApplicationPending){
-							var dataCrc = ((response.flash_crch << 8) + response.flash_crcl).toString(16);
-							var calcCrc = crc16UsbRead(Buffer.from(this.writeApplicationCRCData,"hex"));
-							this.writeApplicationCRCStatus = {crcResponseData:{flash_crcl:response.flash_crcl,flash_crch:response.flash_crch},dataCRC:dataCrc,calculatedCRC:calcCrc};
-							this.writeApplicationCRCStatus.statusOk = (dataCrc == calcCrc);
-						}
 						this.log("Bootloader CRC - FLASH_CRCL: " + response.flash_crcl + ", FLASH_CRCH: " + response.flash_crch);
-						return response;
+						this.completePending(response);
 					break;
 					case commands.APPLICATION:
+						this.log("Jump to application response");
 						// No response from JUMP to application command
+						this.completePending(response);
 					break;
 					default:
 						this.log("Cannot decode response data - unexpected command error");
@@ -326,9 +363,9 @@ module.exports = class MchPicUsbHidBootloader{
 
 	eraseAndWrite(file,jumpToApp){
 		var result = new Promise(function(resolve, reject) {
-			this.sendCommand(Buffer.from([commands.ERASE])).then(function(){
-				this.writeApplication(file,jumpToApp).then(function(value){
-					resolve(value);
+			this.sendCommand(Buffer.from([commands.ERASE])).then(function(value){
+				this.writeApplication(file,jumpToApp).then(function(subValue){
+					resolve(subValue);
 				}).catch(function(subErr){
 					reject(subErr);
 				});
@@ -407,33 +444,23 @@ module.exports = class MchPicUsbHidBootloader{
 							scope.sendCommand(Buffer.concat([Buffer.from([commands.READ]),Buffer.from(crcDataCmd,"hex")])).then(function(value){
 								scope.log("Read CRC ok");
 
-					        	scope.writeApplicationPending = true;
-					        	scope.writeApplicationCRCData = crcDataGroupsObjs[crcGprCount].data;
-					        	var crcCheck = setInterval(function(){
-					        		if(scope.writeApplicationCRCStatus){
-					        			scope.writeApplicationPending = false;
-					        			scope.writeApplicationCRCData = false;
 
-					        			if(scope.writeApplicationCRCStatus.statusOk){
-					       					scope.writeApplicationCRCStatus = false;
 
-					        				crcGprCount++;
-					        				checkCrcGroups();
-					        			}else{
-					        				scope.log(sprintf('CRC check fail for line %s, at index %s, with FLASH_CRCL %s - FLASH_CRCH %s : FLASH response CRC %s, and program calculated CRC %s', data[crcDataGroupsObjs[crcGprCount].count], crcDataGroupsObjs[crcGprCount].count, 
-					        				scope.writeApplicationCRCStatus.crcResponseData.flash_crcl,scope.writeApplicationCRCStatus.crcResponseData.flash_crch,scope.writeApplicationCRCStatus.dataCRC,scope.writeApplicationCRCStatus.calculatedCRC));
-					        				scope.writeApplicationCRCStatus = false;
+								var dataCrc = ((value.flash_crch << 8) + value.flash_crcl).toString(16);
+								var calcCrc = crc16UsbRead(Buffer.from(crcDataGroupsObjs[crcGprCount].data,"hex"));
+								if(dataCrc == calcCrc){
+									crcGprCount++;
+					        		checkCrcGroups();
+								}else{
+									scope.log(sprintf('CRC check fail for line %s, at index %s, with FLASH_CRCL %s - FLASH_CRCH %s : FLASH response CRC %s, and program calculated CRC %s', data[crcDataGroupsObjs[crcGprCount].count], crcDataGroupsObjs[crcGprCount].count, 
+			        				value.flash_crcl,value.flash_crch,dataCrc,calcCrc));
 
-					        				scope.sendCommand(Buffer.from([commands.ERASE])).then(function(value){
-												reject("Erase ok");
-					        				}).catch(function(err){
-					        					reject("Erase error " + err);
-					        				});
-					        			}
-
-					        			clearInterval(crcCheck);
-					        		}
-					        	},100);
+			        				scope.sendCommand(Buffer.from([commands.ERASE])).then(function(value){
+										reject("Erase ok");
+			        				}).catch(function(err){
+			        					reject("Erase error " + err);
+			        				});
+								}
 							}).catch(function(err){
 								scope.log("Read CRC error " + err);
 
