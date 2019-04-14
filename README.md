@@ -8,5 +8,6 @@ The module is in early stages and is tested only on a pic32mx250f128b device. To
 1 - Program the device with the unified hex on the resurces folder, you will probably need a device debugger / programmer like pickit
 2 - Connect the device to usb port
 3 - Install module with npm install
-4 - Put device on bootloader mode running node bootloader.js (the bootloader.js is on the device specific folder on resources) <- pending to delegate this part to the test
 5 - run npm test
+
+Pending to upload full Mplabx project and test board schematic files
