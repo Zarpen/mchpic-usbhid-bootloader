@@ -1,5 +1,8 @@
 'use strict';
 
+/* GLOBALS */
+
+// Enable / Disable global log
 var globalLog = false;
 
 const fs = require('fs');
@@ -9,12 +12,16 @@ const sprintf = require('sprintf-js').sprintf;
 const vsprintf = require('sprintf-js').vsprintf;
 const uuidv1 = require('uuid/v1');
 
+// Control Characters constant values
+// DOC: https://github.com/Zarpen/mchpic-usbhid-bootloader/blob/master/doc/01388B.pdf, https://github.com/Zarpen/mchpic-usbhid-bootloader/blob/master/doc/01388B.pdf
 const controlCharacters = {
 	SOH: 0x01,
 	EOT: 0x04,
 	DLE: 0x10
 };
 
+// Commands constants values
+// DOC: https://github.com/Zarpen/mchpic-usbhid-bootloader/blob/master/doc/01388B.pdf, https://github.com/Zarpen/mchpic-usbhid-bootloader/blob/master/doc/01388B.pdf
 const commands ={
 	VERSION: 0x01,
 	ERASE: 0x02,
@@ -23,6 +30,7 @@ const commands ={
 	APPLICATION: 0x05
 };
 
+// Define if the program execution environment uses little endian
 const isLittleEndian = (()=>{
     var buf = new ArrayBuffer(4);
     var buf8 = new Uint8ClampedArray(buf);
@@ -35,12 +43,25 @@ const isLittleEndian = (()=>{
     }
 })();
 
+/**
+* This function pad number with zeroes for x minimum length
+*
+* @param num (int) the number to pad
+* @param size (int) the length to pad
+* @return (String) padded number
+*/
 function pad(num, size) {
     var s = num+"";
     while (s.length < size) s = "0" + s;
     return s;
 }
 
+/**
+* This function format buffer value to data
+*
+* @param buffer (Buffer) buffer object
+* @return (String Array) data strings
+*/
 function dataArray(buffer){
 	var result = [];
 	for(var i = 0;i < buffer.length;i++){
@@ -49,6 +70,12 @@ function dataArray(buffer){
 	return result;
 }
 
+/**
+* This function calculate crc16 of data for the send function
+*
+* @param value (String/Buffer) data
+* @return (Buffer) crc16 value
+*/
 function crc16UsbSend(value){
 	var i;
     var crc = 0;
@@ -73,6 +100,12 @@ function crc16UsbSend(value){
 	return new Buffer((crc & 0xFFFF).toString(16),"hex");
 }
 
+/**
+* This function calculate crc16 of data for the read function
+*
+* @param value (String/Buffer) data
+* @return (Buffer) crc16 value
+*/
 function crc16UsbRead(value){
 	var i;
     var crc = 0;
@@ -98,9 +131,35 @@ function crc16UsbRead(value){
 	return (crc & 0xFFFF).toString(16);
 }
 
+/**
+* This function calculate the less significant bit
+*
+* @param value (Buffer) data
+* @return (Buffer) LSB value
+*/
 function lsb(data){ return data & 0xF; }
+/**
+* This function calculate the most significant bit
+*
+* @param value (Buffer) data
+* @return (Buffer) MSB value
+*/
 function msb(data){ return data >> 4; }
+/**
+* This method log the received message
+*
+* @param value (String) msg
+*/
+function log(msg){
+	if(globalLog) console.log(msg);
+}
 
+/**
+* This function create a frame with the formatted data to be send to the device
+*
+* @param value (Buffer) value
+* @return (Buffer) frame
+*/
 function sendFrame(value){
 	var data = value.length || value.length === 0 ? value : [value];
 	var crc = crc16UsbSend(data);
@@ -119,6 +178,13 @@ function sendFrame(value){
 	return Buffer.from(frame);
 }
 
+/**
+* This function decodes a frame received from the device
+*
+* @param value (Buffer) value
+* @param value (Command enum constant) command
+* @return (Void)
+*/
 function decodeFrame(value,command){
 	var data = [];
 	var scape = false;
@@ -128,7 +194,7 @@ function decodeFrame(value,command){
 			scape = false;
 		}else{
 			if(value[i] == controlCharacters.SOH){
-				if(globalLog) console.log("Invalid characters on data");
+				log("Invalid characters on data");
 				return;
 			}
 			if(value[i] == controlCharacters.DLE){
@@ -142,17 +208,23 @@ function decodeFrame(value,command){
 				if(dataCrc == calcCrc){
 					return tmpBuf.slice(0,-2);
 				}else{
-					if(globalLog) console.log("Invalid data CRC");
+					log("Invalid data CRC");
 					return;
 				}
 			}
 			data.push(value[i]);
 		}
 	}
-	if(globalLog) console.log("Invalid data format");
+	log("Invalid data format");
 	return;
 }
 
+/**
+* This function read a frame from the device and try to decode it
+*
+* @param value (Buffer) value
+* @return (Object) decoded data
+*/
 function readFrame(value){
 	var response;
 	if(value[0] == controlCharacters.SOH){
@@ -181,7 +253,6 @@ function readFrame(value){
 			case commands.READ:
 				decodedData = decodeFrame(value.slice(offset),Buffer.from([command]));
 				if(decodedData){
-					// According to bootloader library documentation, the first byte is the major version, but the pic define the struct and in fact return the first byte as the major and second as minor
 					response = {
 						flash_crcl: decodedData[0],
 						flash_crch: decodedData[1]
@@ -192,21 +263,37 @@ function readFrame(value){
 				// No response from JUMP to application command
 			break;
 			default:
-				if(globalLog) console.log("Unknown command frame");
+				log("Unknown command frame");
 		}
 
 		if(!response){
-			if(globalLog) console.log("Invalid frame command format");
+			log("Invalid frame command format");
 		}else{
 			response.command = command;
 		}
 	}else{
-		if(globalLog) console.log("Invalid frame");
+		log("Invalid frame");
 	}
 	return response;
 }
 
+/**
+* 
+* Microchip PIC USB-HID Bootloader Communication Library
+*
+* This class performs basic communication with Microchip Harmony Framework v1.11 Bootloader
++
+* @author  Alberto Romo Valverde
+* @version 1.0
+* @since   2019-04-15
+*/
 module.exports = class MchPicUsbHidBootloader{
+   /**
+   * Constructor for the class, it takes the flash program region boundary
+   *
+   * @param (String) appFlashBaseAddress Start program flash base address, as defined on linker file and system_config.h
+   * @param (String) appFlashEndAddress  End program flash base address, as defined on linker file and system_config.h
+   */
 	constructor(appFlashBaseAddress, appFlashEndAddress) {
 		this.pendingCommands = [];
     	this.appFlashBaseAddress = appFlashBaseAddress;
@@ -217,23 +304,50 @@ module.exports = class MchPicUsbHidBootloader{
     	this.commandsTimeoutInterval;
 	}
 
+	/**
+    * This method enable or disable the library debug comments
+    *
+    * @param option (boolean) Takes true | false to enable or disable debug comments
+    */
 	setDebug(option){
 		this.debug = option;
 		globalLog = this.debug;
 	}
 
+	/**
+    * This method configure the usb library debug mode
+    *
+    * @param option (int) Takes (0 - 4) for different debug level, more info on https://github.com/tessel/node-usb
+    */
 	setUsbDebug(option){
 		this.debugUsb = option;
 	}
 
+	/**
+    * This method configure the commands timeout, defaults to -1 (no timeout)
+    *
+    * @param timeout (int) commands timeout in milliseconds
+    */
 	setTimeout(timeout){
 		this.commandsTimeout = timeout;
 	}
 
+	/**
+    * Debug message if debug enabled
+    *
+    * @param trace (String) message
+    */
 	log(trace){
 		if(this.debug) console.log(trace);
 	}
 
+	/**
+    * This method take the device vendor and pid identifiers. It configure and open the usb device library, 
+    * also starts usb poll and commands timeout watcher
+    *
+    * @param vendor (String) usb device vendor
+    * @param pid (String) usb device pid
+    */
 	openUsb(vendor,pid){
 		if(this.debugUsb === 0 || this.debugUsb > 0) usb.setDebugLevel(this.debugUsb);
 		this.device = usb.findByIds(vendor,pid);
@@ -278,6 +392,9 @@ module.exports = class MchPicUsbHidBootloader{
 		},100);
 	}
 
+	/**
+    * This method release library resources closing usb device library, usb poll and commands timeout watcher
+    */
 	closeUsb(){
 		this.inEndPoint.stopPoll();
 	    this.device.interfaces[0].release(true,function(err){
@@ -287,10 +404,22 @@ module.exports = class MchPicUsbHidBootloader{
 	    clearInterval(this.commandsTimeoutInterval);
 	}
 
+	/**
+    * This helper function returns the commands constant
+    *
+    * @return (Object) commands constant
+    */
 	static get commands() {
 	    return commands;
 	}
 
+	/**
+    * The function sends a command to the device out endpoint and add the command to the poll
+    *
+    * @param data (Object) buffer object or buffer array
+    * @param timeout (int) the command timeout
+    * @return (Object) promise
+    */
 	sendCommand(data,timeout){
 		var scope = this;
 		var result = new Promise(function(resolve, reject) {
@@ -311,6 +440,11 @@ module.exports = class MchPicUsbHidBootloader{
 		return result;
 	}
 
+	/**
+    * This method complete the command on the poll associated with the specific response
+    *
+    * @param response (Object) command response
+    */
 	completePending(response){
 		var index = -1;
 		for(var i = this.pendingCommands.length-1;i >= 0;i--){
@@ -323,6 +457,11 @@ module.exports = class MchPicUsbHidBootloader{
 		if(index >= 0) this.pendingCommands.splice(index,1);
 	}
 
+	/**
+    * This method read command response from device, detect command type and complete it from the pending commands poll
+    *
+    * @param data (Object) command response data
+    */
 	readCommand(data){
 		if(data){
 			var response = readFrame(data);
@@ -361,6 +500,13 @@ module.exports = class MchPicUsbHidBootloader{
 		}
 	}
 
+	/**
+    * This function erase and write the device and return operation promise
+    *
+    * @param file (String) path to the .hex file
+    * @param jumpToApp (boolean) device jump to app after programming flag
+    * @return (Object) promise
+    */
 	eraseAndWrite(file,jumpToApp){
 		var result = new Promise(function(resolve, reject) {
 			this.sendCommand(Buffer.from([commands.ERASE])).then(function(value){
@@ -376,6 +522,13 @@ module.exports = class MchPicUsbHidBootloader{
 		return result;
 	}
 
+	/**
+    * This function read the file data and write it to the device
+    *
+    * @param file (String) path to the .hex file
+    * @param jumpToApp (boolean) device jump to app after programming flag
+    * @return (Object) promise
+    */
 	writeApplication(file,jumpToApp){
 		var result = new Promise(function(resolve, reject) {
 			var readable = fs.createReadStream(file);
